@@ -1,14 +1,17 @@
+use std::io::{self, Read};
+
 use crate::backend::Mem;
 
-use super::Addr;
+use super::{cpu::CPU, Addr, DEFAULT_PC};
 
 pub(crate) struct MMU([u8; 4096]);
 
 impl MMU {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(f: &mut std::fs::File) -> io::Result<Self> {
         let mut ram = [0u8; 4096];
+        f.read(&mut ram[DEFAULT_PC..])?;
         ram[..80].copy_from_slice(&FONT);
-        MMU(ram)
+        Ok(MMU(ram))
     }
 }
 

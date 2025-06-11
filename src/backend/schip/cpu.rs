@@ -1,43 +1,59 @@
-use rand::Rng;
-use crate::{backend::{util::as_nibbles, Cpu, Mem, U4}, framebuffer, util::bcd, Framebuffer};
+use array2d::Array2D;
+use bit_array::BitArray;
+use rand::{rngs::StdRng, Rng};
+use typenum::U8;
+use crate::{backend::{u4, util::as_nibbles, Cpu, Mem}, terminal::Monochrome, util::bcd, Renderer};
 
-use super::{ins::Ins, mmu::MMU, Addr, Key};
+use super::{ins::Ins, mmu::MMU, Addr, Key, DEFAULT_PC};
 
-struct CPU<R: Rng> {
+fn white_screen() -> Array2D<Monochrome> {
+    Array2D::filled_with(Monochrome::White, 32, 64)
+}
+
+pub(crate) struct CPU {
     delay: u8,
-    framebuffer: Framebuffer,
+    framebuffer: Array2D<Monochrome>,
     index: Addr,
-    pressed: Option<Key>,
     pc: Addr,
-    rd: R,
+    pressed: Option<Key>,
+    rd: StdRng,
     released: Option<Key>,
     sound: u8,
+    stack: Vec<Addr>,
     v: [u8; 16],
 }
 
-impl<R: Rng> CPU<R> {
-    const DEFAULT_PC: u16 = 0x200;
+impl Renderer for CPU {
+    type C = Monochrome;
 
-    pub(crate) fn new(rd: R) -> Self {
+    fn framebuffer(&self) -> &Array2D<Self::C> {
+        &self.framebuffer
+    }
+}
+
+impl CPU {
+    pub(crate) fn new(rd: StdRng) -> Self {
         CPU {
             delay: 0,
-            framebuffer: Framebuffer::new(64, 32),
+            framebuffer: white_screen(),
             index: 0,
             pressed: None,
-            pc: Self::DEFAULT_PC,
+            pc: DEFAULT_PC as Addr,
             released: None,
             rd,
             sound: 0,
+            stack: Vec::new(),
             v: [0u8; 16],
         }
     }
 
     fn step(&mut self) {
-        self.pc += Self::FETCH_SIZE as u16;
+        self.pc += self.ins_size() as u16;
+        println!("PC {:x}", self.pc);
     }
 
     fn step_back(&mut self) {
-        self.pc -= Self::FETCH_SIZE as u16;
+        self.pc -= self.ins_size() as u16;
     }
 
     fn step_if(&mut self, cond: bool) {
@@ -45,103 +61,23 @@ impl<R: Rng> CPU<R> {
             self.step();
         }
     }
-}
 
-impl<R: Rng> Cpu<Ins, MMU, 2> for CPU<R> {
-    fn execute(&mut self, mmu: &mut MMU, ins: Ins) {
-        macro_rules! v {
-            ($x:expr) => { self.v[$x as usize] };
-        }
-
-        macro_rules! i {
-            ($x:expr) => { self.index + $x as u16 };
-        }
-
-        match ins {
-            Ins::Op0NNN(addr) => todo!(),
-            Ins::Op00E0 => self.framebuffer = Framebuffer::new(64, 32),
-            Ins::Op00EE => todo!(),
-            Ins::Op1NNN(addr) => self.pc = addr,
-            Ins::Op2NNN(addr) => todo!(),
-            Ins::Op3XNN(x, nn) => self.step_if(v!(x) == nn),
-            Ins::Op4XNN(x, nn) => self.step_if(v!(x) != nn),
-            Ins::Op5XY0(x, y) => self.step_if(v!(x) == v!(y)),
-            Ins::Op6XNN(x, nn) => v!(x) = nn,
-            Ins::Op7XNN(x, nn) => v!(x) += nn,
-            Ins::Op8XY0(x, y) => v!(x) = v!(y),
-            Ins::Op8XY1(x, y) => v!(x) |= v!(y),
-            Ins::Op8XY2(x, y) => v!(x) &= v!(y),
-            Ins::Op8XY3(x, y) => v!(x) ^= v!(y),
-            Ins::Op8XY4(x, y) => {
-                let (vx, o) = v!(x).overflowing_add(v!(y));
-                v!(x) = vx;
-                v!(0x0F) = o as u8;
-            },
-            Ins::Op8XY5(x, y) => {
-                let (vx, o) = v!(x).overflowing_sub(v!(y));
-                v!(x) = vx;
-                v!(0x0F) = !o as u8;
-            },
-            Ins::Op8XY6(x, _) => {
-                v!(0x0F) = v!(x) & 0x01;
-                v!(x) >>= 1;
-            }
-            Ins::Op8XY7(x, y) => {
-                let (vx, o) = v!(y).overflowing_sub(v!(x));
-                v!(x) = vx;
-                v!(0x0F) = !o as u8;
-            },
-            Ins::Op8XYE(x, y) => {
-                v!(0x0F) = ((v!(x) & 0x80) != 0) as u8;
-                v!(x) <<= 1;
-            },
-            Ins::Op9XY0(x, y) => self.step_if(v!(x) != v!(y)),
-            Ins::OpANNN(addr) => self.index = addr,
-            Ins::OpBNNN(addr) => self.pc = addr + v!(0) as u16,
-            Ins::OpCXNN(x, nn) => v!(x) = self.rd.random::<u8>() & nn,
-            Ins::OpDXYN(x, y, n) => {
-                v!(0xF) = 0;
-                for i in 0..n {
-                    let byte = mmu.read(i!(i));
-                    for j in x..x+8 {
-                        if (byte >> (7 - j) & 0x01) != 0 {
-                            self.framebuffer[(i, j)].invert();
-                            v!(0xF) = 1;
-                        }
-                    }
-                }
-            },
-            Ins::OpEX9E(x) => self.step_if(self.pressed == Some(v!(x) & 0x0F as U4)),
-            Ins::OpEXA1(x) => self.step_if(self.pressed != Some(v!(x) & 0x0F as U4)),
-            Ins::OpFX07(x) => v!(x) = self.delay,
-            Ins::OpFX0A(x) => match self.released {
-                Some(key) => v!(x) = key,
-                None => self.step_back(),
-            },
-            Ins::OpFX15(x) => self.delay = v!(x),
-            Ins::OpFX18(x) => self.sound = v!(x),
-            Ins::OpFX1E(x) => self.index += v!(x) as u16,
-            Ins::OpFX29(x) => self.index = 5 * v!(x) as u16,
-            Ins::OpFX33(x) => {
-                let s = bcd(v!(x));
-                for i in 0..3 {
-                    mmu.write(i!(i), s[i]);
-                }
-            },
-            Ins::OpFX55(x) => {
-                for i in 0..=x {
-                    let addr = self.index + i as u16;
-                    mmu.write(i!(i), v!(i));
-                }
-            },
-            Ins::OpFX65(x) => {
-                for i in 0..=x {
-                    v!(i) = mmu.read(i!(i));
-                }
-            }
+    pub(crate) fn update_pressed(&mut self, key: Option<Key>) {
+        match (self.pressed, key) {
+            (Some(cur), Some(new)) if cur > new => self.pressed = key,
+            (None, _) => self.pressed = key,
+            _ => (),
         }
     }
-    
+
+    pub(crate) fn update_released(&mut self, key: Option<Key>) {
+        if self.released == None {
+            self.released = key;
+        }
+    }
+}
+
+impl Cpu<Ins, MMU, 2> for CPU {
     fn fetch(&mut self, mmu: &MMU) -> [u8; 2] {
         let b0 = mmu.read(self.pc);
         let b1 = mmu.read(self.pc + 1);
@@ -151,7 +87,7 @@ impl<R: Rng> Cpu<Ins, MMU, 2> for CPU<R> {
     
     fn decode(&self, buf: &[u8; 2]) -> Ins {
         let nn = buf[1];
-        let nnn = u16::from_be_bytes(*buf);
+        let nnn = (((buf[0] & 0x0F) as u16) << 8) + buf[1] as u16;
         match as_nibbles(buf) {
             [0x0, 0x0, 0xE, 0x0] => Ins::Op00E0,
             [0x0, 0x0, 0xE, 0xE] => Ins::Op00EE,
@@ -169,9 +105,9 @@ impl<R: Rng> Cpu<Ins, MMU, 2> for CPU<R> {
             [0x8, x, y, 0x3] => Ins::Op8XY3(x, y),
             [0x8, x, y, 0x4] => Ins::Op8XY4(x, y),
             [0x8, x, y, 0x5] => Ins::Op8XY5(x, y),
-            [0x8, x, y, 0x6] => Ins::Op8XY6(x, y),
+            [0x8, x, _, 0x6] => Ins::Op8XY6(x),
             [0x8, x, y, 0x7] => Ins::Op8XY7(x, y),
-            [0x8, x, y, 0xE] => Ins::Op8XYE(x, y),
+            [0x8, x, _, 0xE] => Ins::Op8XYE(x),
             [0x9, x, y, 0x0] => Ins::Op9XY0(x, y),
             [0xA, _, _, _] => Ins::OpANNN(nnn),
             [0xB, _, _, _] => Ins::OpBNNN(nnn),
@@ -189,6 +125,120 @@ impl<R: Rng> Cpu<Ins, MMU, 2> for CPU<R> {
             [0xF, x, 0x5, 0x5] => Ins::OpFX55(x),    // LD [I], Vx
             [0xF, x, 0x6, 0x5] => Ins::OpFX65(x),    // LD Vx, [I]
             _ => panic!()
+        }
+    }
+    
+    fn execute(&mut self, mmu: &mut MMU, ins: Ins) {
+        macro_rules! v {
+            ($x:expr) => { self.v[$x as usize] };
+        }
+
+        macro_rules! i {
+            ($x:expr) => { self.index + $x as u16 };
+        }
+
+        println!("{:?}", ins);
+
+        match ins {
+            Ins::Op00E0 => self.framebuffer = white_screen(),
+            Ins::Op00EE => {
+                if let Some(addr) = self.stack.pop() {
+                    self.pc = addr;
+                }
+            },
+            Ins::Op0NNN(_addr) => unimplemented!(),
+            Ins::Op1NNN(addr) => self.pc = addr,
+            Ins::Op2NNN(addr) => {
+                self.stack.push(addr);
+                self.pc = addr;
+            },
+            Ins::Op3XNN(x, nn) => self.step_if(v!(x) == nn),
+            Ins::Op4XNN(x, nn) => self.step_if(v!(x) != nn),
+            Ins::Op5XY0(x, y) => self.step_if(v!(x) == v!(y)),
+            Ins::Op6XNN(x, nn) => v!(x) = nn,
+            Ins::Op7XNN(x, nn) => v!(x) = v!(x).wrapping_add(nn),
+            Ins::Op8XY0(x, y) => v!(x) = v!(y),
+            Ins::Op8XY1(x, y) => v!(x) |= v!(y),
+            Ins::Op8XY2(x, y) => v!(x) &= v!(y),
+            Ins::Op8XY3(x, y) => v!(x) ^= v!(y),
+            Ins::Op8XY4(x, y) => {
+                let (vx, o) = v!(x).overflowing_add(v!(y));
+                v!(x) = vx;
+                v!(0x0F) = o as u8;
+            },
+            Ins::Op8XY5(x, y) => {
+                let (vx, o) = v!(x).overflowing_sub(v!(y));
+                v!(x) = vx;
+                v!(0x0F) = !o as u8;
+            },
+            Ins::Op8XY6(x) => {
+                v!(0x0F) = v!(x) & 0x01;
+                v!(x) >>= 1;
+            }
+            Ins::Op8XY7(x, y) => {
+                let (vx, o) = v!(y).overflowing_sub(v!(x));
+                v!(x) = vx;
+                v!(0x0F) = !o as u8;
+            },
+            Ins::Op8XYE(x) => {
+                v!(0x0F) = ((v!(x) & 0x80) != 0) as u8;
+                v!(x) <<= 1;
+            },
+            Ins::Op9XY0(x, y) => self.step_if(v!(x) != v!(y)),
+            Ins::OpANNN(addr) => self.index = addr,
+            Ins::OpBNNN(addr) => self.pc = addr + v!(0) as u16,
+            Ins::OpCXNN(x, nn) => v!(x) = self.rd.random::<u8>() & nn,
+            Ins::OpDXYN(x, y, n) => {
+                v!(0xF) = 0;
+                let x_pos = v!(x) % 64;
+                let y_pos = v!(y) % 32;
+                for row in 0..n {
+                    let a = mmu.read(i!(row));
+                    let bv = BitArray::<u8, U8>::from_bytes(&[a]);
+                    for (col, bit) in bv.iter().enumerate() {
+                        if bit {
+                            let i = (row + y_pos) as usize;
+                            let j = col + x_pos as usize;
+                            if let Some(pixel) = self.framebuffer.get_mut(i, j) {
+                                match pixel {
+                                    Monochrome::White => *pixel = Monochrome::Black,
+                                    Monochrome::Black => {
+                                        *pixel = Monochrome::White;
+                                        v!(0xF) = 1;
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            Ins::OpEX9E(x) => self.step_if(self.pressed == Some(v!(x) & 0x0F as u4)),
+            Ins::OpEXA1(x) => self.step_if(self.pressed != Some(v!(x) & 0x0F as u4)),
+            Ins::OpFX07(x) => v!(x) = self.delay,
+            Ins::OpFX0A(x) => match self.released {
+                Some(key) => v!(x) = key,
+                None => self.step_back(),
+            },
+            Ins::OpFX15(x) => self.delay = v!(x),
+            Ins::OpFX18(x) => self.sound = v!(x),
+            Ins::OpFX1E(x) => self.index += v!(x) as u16,
+            Ins::OpFX29(x) => self.index = 5 * v!(x) as u16,
+            Ins::OpFX33(x) => {
+                let s = bcd(v!(x));
+                for i in 0..3 {
+                    mmu.write(i!(i), s[i]);
+                }
+            },
+            Ins::OpFX55(x) => {
+                for i in 0..=x {
+                    mmu.write(i!(i), v!(i));
+                }
+            },
+            Ins::OpFX65(x) => {
+                for i in 0..=x {
+                    v!(i) = mmu.read(i!(i));
+                }
+            }
         }
     }
 }

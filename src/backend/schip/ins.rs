@@ -1,6 +1,6 @@
-use super::{Addr, Reg, U4};
+use super::{Addr, Reg, u4};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum Ins {
     Op0NNN(Addr),
     Op00E0,
@@ -18,14 +18,14 @@ pub(crate) enum Ins {
     Op8XY3(Reg, Reg),
     Op8XY4(Reg, Reg),
     Op8XY5(Reg, Reg),
-    Op8XY6(Reg, Reg),
+    Op8XY6(Reg),
     Op8XY7(Reg, Reg),
-    Op8XYE(Reg, Reg),
+    Op8XYE(Reg),
     Op9XY0(Reg, Reg),
     OpANNN(Addr),
     OpBNNN(Addr),
     OpCXNN(Reg, u8),
-    OpDXYN(Reg, Reg, U4),
+    OpDXYN(Reg, Reg, u4),
     OpEX9E(Reg),
     OpEXA1(Reg),
     OpFX07(Reg),
