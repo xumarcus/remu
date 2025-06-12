@@ -1,45 +1,27 @@
-use array2d::Array2D;
 use bit_array::BitArray;
 use rand::{rngs::StdRng, Rng};
 use typenum::U8;
-use crate::{backend::{u4, util::as_nibbles, Cpu, Mem}, terminal::Monochrome, util::bcd, Renderer};
+use crate::{backend::{as_nibbles, as_u4, bcd, Cpu, Mem}, terminal::Monochrome};
 
-use super::{ins::Ins, mmu::MMU, Addr, Key, DEFAULT_PC};
+use super::{ins::Ins, mmu::MMU, Addr, SysIO, DEFAULT_PC};
 
-fn white_screen() -> Array2D<Monochrome> {
-    Array2D::filled_with(Monochrome::White, 32, 64)
-}
-
+#[derive(Debug)]
 pub(crate) struct CPU {
-    delay: u8,
-    framebuffer: Array2D<Monochrome>,
+    delay: u8, 
     index: Addr,
     pc: Addr,
-    pressed: Option<Key>,
     rd: StdRng,
-    released: Option<Key>,
     sound: u8,
     stack: Vec<Addr>,
     v: [u8; 16],
-}
-
-impl Renderer for CPU {
-    type C = Monochrome;
-
-    fn framebuffer(&self) -> &Array2D<Self::C> {
-        &self.framebuffer
-    }
 }
 
 impl CPU {
     pub(crate) fn new(rd: StdRng) -> Self {
         CPU {
             delay: 0,
-            framebuffer: white_screen(),
             index: 0,
-            pressed: None,
             pc: DEFAULT_PC as Addr,
-            released: None,
             rd,
             sound: 0,
             stack: Vec::new(),
@@ -49,7 +31,6 @@ impl CPU {
 
     fn step(&mut self) {
         self.pc += self.ins_size() as u16;
-        println!("PC {:x}", self.pc);
     }
 
     fn step_back(&mut self) {
@@ -61,23 +42,9 @@ impl CPU {
             self.step();
         }
     }
-
-    pub(crate) fn update_pressed(&mut self, key: Option<Key>) {
-        match (self.pressed, key) {
-            (Some(cur), Some(new)) if cur > new => self.pressed = key,
-            (None, _) => self.pressed = key,
-            _ => (),
-        }
-    }
-
-    pub(crate) fn update_released(&mut self, key: Option<Key>) {
-        if self.released == None {
-            self.released = key;
-        }
-    }
 }
 
-impl Cpu<Ins, MMU, 2> for CPU {
+impl Cpu<Ins, MMU, SysIO, 2> for CPU {
     fn fetch(&mut self, mmu: &MMU) -> [u8; 2] {
         let b0 = mmu.read(self.pc);
         let b1 = mmu.read(self.pc + 1);
@@ -128,7 +95,7 @@ impl Cpu<Ins, MMU, 2> for CPU {
         }
     }
     
-    fn execute(&mut self, mmu: &mut MMU, ins: Ins) {
+    fn execute(&mut self, mmu: &mut MMU, sysio: &mut SysIO, ins: Ins) {
         macro_rules! v {
             ($x:expr) => { self.v[$x as usize] };
         }
@@ -140,7 +107,7 @@ impl Cpu<Ins, MMU, 2> for CPU {
         println!("{:?}", ins);
 
         match ins {
-            Ins::Op00E0 => self.framebuffer = white_screen(),
+            Ins::Op00E0 => sysio.0.clear(),
             Ins::Op00EE => {
                 if let Some(addr) = self.stack.pop() {
                     self.pc = addr;
@@ -149,7 +116,7 @@ impl Cpu<Ins, MMU, 2> for CPU {
             Ins::Op0NNN(_addr) => unimplemented!(),
             Ins::Op1NNN(addr) => self.pc = addr,
             Ins::Op2NNN(addr) => {
-                self.stack.push(addr);
+                self.stack.push(self.pc);
                 self.pc = addr;
             },
             Ins::Op3XNN(x, nn) => self.step_if(v!(x) == nn),
@@ -172,8 +139,9 @@ impl Cpu<Ins, MMU, 2> for CPU {
                 v!(0x0F) = !o as u8;
             },
             Ins::Op8XY6(x) => {
-                v!(0x0F) = v!(x) & 0x01;
+                let res = v!(x) & 0x01;
                 v!(x) >>= 1;
+                v!(0x0F) = res;
             }
             Ins::Op8XY7(x, y) => {
                 let (vx, o) = v!(y).overflowing_sub(v!(x));
@@ -181,8 +149,9 @@ impl Cpu<Ins, MMU, 2> for CPU {
                 v!(0x0F) = !o as u8;
             },
             Ins::Op8XYE(x) => {
-                v!(0x0F) = ((v!(x) & 0x80) != 0) as u8;
+                let res = ((v!(x) & 0x80) != 0) as u8;
                 v!(x) <<= 1;
+                v!(0x0F) = res;
             },
             Ins::Op9XY0(x, y) => self.step_if(v!(x) != v!(y)),
             Ins::OpANNN(addr) => self.index = addr,
@@ -199,7 +168,7 @@ impl Cpu<Ins, MMU, 2> for CPU {
                         if bit {
                             let i = (row + y_pos) as usize;
                             let j = col + x_pos as usize;
-                            if let Some(pixel) = self.framebuffer.get_mut(i, j) {
+                            if let Some(pixel) = sysio.0.0.get_mut(i, j) {
                                 match pixel {
                                     Monochrome::White => *pixel = Monochrome::Black,
                                     Monochrome::Black => {
@@ -212,10 +181,10 @@ impl Cpu<Ins, MMU, 2> for CPU {
                     }
                 }
             },
-            Ins::OpEX9E(x) => self.step_if(self.pressed == Some(v!(x) & 0x0F as u4)),
-            Ins::OpEXA1(x) => self.step_if(self.pressed != Some(v!(x) & 0x0F as u4)),
+            Ins::OpEX9E(x) => self.step_if(sysio.1.is_pressed(as_u4(v!(x)))),
+            Ins::OpEXA1(x) => self.step_if(!sysio.1.is_pressed(as_u4(v!(x)))),
             Ins::OpFX07(x) => v!(x) = self.delay,
-            Ins::OpFX0A(x) => match self.released {
+            Ins::OpFX0A(x) => match sysio.1.get_pressed() {
                 Some(key) => v!(x) = key,
                 None => self.step_back(),
             },

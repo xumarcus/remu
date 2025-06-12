@@ -6,22 +6,17 @@ use rand::{rngs::StdRng, SeedableRng};
 mod backend;
 // mod frontend;
 mod terminal;
-mod util;
 
-pub trait Renderer {
+pub trait System : Sized {
     type C: Copy + Eq + Sized;
 
-    fn framebuffer(&self) -> &Array2D<Self::C>;
-}
-
-pub trait System : Renderer + Sized {
-    fn device_event(&mut self, event: winit::event::DeviceEvent);
-    fn tick(&mut self);
+    fn from_rom_with_rd(f: &mut File, rd: StdRng) -> io::Result<Self>;
     fn from_rom(f: &mut File) -> io::Result<Self> {
         Self::from_rom_with_rd(f, StdRng::from_os_rng())
     }
-    fn from_rom_with_rd(f: &mut File, rd: StdRng) -> io::Result<Self>;
+    fn render(&self) -> &Array2D<Self::C>;
+    fn tick(&mut self, event: Option<winit::event::DeviceEvent>);
 }
 
 pub use backend::schip::Schip;
-pub use terminal::Painted;
+pub use terminal::write_framebuffer;

@@ -1,25 +1,27 @@
-use std::{fs::File, panic::AssertUnwindSafe, path::Path};
+use std::{fs::File, path::Path};
 
-use remu::{Painted, Renderer, Schip, System};
+use remu::{write_framebuffer, Schip, System};
+use termcolor::StandardStream;
+use winit::{event::RawKeyEvent, keyboard::KeyCode};
 
 fn main() -> std::io::Result<()> {
-    let path = Path::new("test-roms/schip/IBM Logo.ch8");
+    let path = Path::new("test-roms/schip/5-quirks.ch8");
     let mut f = File::open(path)?;
     let mut schip = Schip::from_rom(&mut f)?;
-    
-    /* Run the emulator until it panics
-    let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        loop {
-            schip.tick();
-        }
-    }));
-    println!("{:#?}", res);
-    */ 
 
-    for _ in 0..200 {
-        schip.tick();
+    for _ in 0..2000 {
+        schip.tick(None);
     }
-    println!("{}", Painted(schip.framebuffer()));
+    schip.tick(Some(winit::event::DeviceEvent::Key(RawKeyEvent {
+        physical_key: winit::keyboard::PhysicalKey::Code(KeyCode::KeyA),
+        state: winit::event::ElementState::Pressed
+    })));
+    for _ in 0..2000 {
+        schip.tick(None);
+    }
+    
+    let mut out = StandardStream::stdout(termcolor::ColorChoice::Always);
+    write_framebuffer(&mut out, schip.render())?;
 
     Ok(())
 }

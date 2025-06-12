@@ -2,7 +2,7 @@ use std::io::{self, Read};
 
 use crate::backend::Mem;
 
-use super::{cpu::CPU, Addr, DEFAULT_PC};
+use super::{Addr, DEFAULT_PC};
 
 pub(crate) struct MMU([u8; 4096]);
 
